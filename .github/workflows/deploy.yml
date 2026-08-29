@@ -65,6 +65,17 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Secrets pasted from aligned terminal output often carry stray
+          # whitespace. An ARN with a leading space silently fails to match the
+          # iam:PassRole resource, and AWS reports that as AccessDenied on
+          # CreateAgentRuntime — pointing at entirely the wrong thing.
+          EXEC_ROLE_ARN="$(printf '%s' "$EXEC_ROLE_ARN" | tr -d '[:space:]')"
+          FPL_BACKEND_URL="$(printf '%s' "${FPL_BACKEND_URL:-}" | tr -d '[:space:]')"
+          case "$EXEC_ROLE_ARN" in
+            arn:aws:iam::*:role/*) ;;
+            *) echo "::error::AGENTCORE_EXECUTION_ROLE_ARN is not a role ARN: '$EXEC_ROLE_ARN'"; exit 1 ;;
+          esac
+
           ARTIFACT="$(jq -nc --arg uri "$IMAGE" \
             '{containerConfiguration:{containerUri:$uri}}')"
 
