@@ -51,6 +51,45 @@ token quota at 0.
    underscores — no hyphens. Hence `fpl_agent`, not `fpl-agent` (the ECR repo can
    keep the hyphen; they are different namespaces).
 
+## Debugging a failed deploy
+
+Two traps cost real time here; both produce misleading errors.
+
+**1. Whitespace in a secret.** A leading space in `AGENTCORE_EXECUTION_ROLE_ARN`
+makes the ARN fail to match the `iam:PassRole` resource. AWS reports that as
+`AccessDenied` on **`CreateAgentRuntime`** — pointing at a permission that is not
+missing. The workflow now strips whitespace and validates the ARN shape, but if
+you see an inexplicable `AccessDenied`, read the actual request first:
+
+```bash
+aws cloudtrail lookup-events --region eu-central-1 \
+  --lookup-attributes AttributeKey=EventName,AttributeValue=CreateAgentRuntime \
+  --max-results 3 --query 'Events[1].CloudTrailEvent' --output text | python3 -m json.tool
+```
+
+`requestParameters` shows exactly what CI sent, quoted — which is how the stray
+space was found. The summary fields alone do not reveal it.
+
+**2. Test a policy without a CI round trip.** `get-federation-token` intersects
+your own credentials with a policy file, so you can run the real API call under
+exactly the permissions a role would have — in seconds, touching no role or trust
+policy:
+
+```bash
+aws sts get-federation-token --name probe --duration-seconds 900 \
+  --policy file://policy.json --query Credentials
+# export the three values, then make the real call
+```
+
+This is how the 11-action policy above was verified sufficient. Prefer it to
+`simulate-principal-policy`, which only evaluates the action you ask about and
+cannot see transitively required permissions. Note that simulate also reports a
+misleading `implicitDeny` for resource- or condition-scoped actions such as
+`iam:PassRole` unless you pass `--resource-arns` and `--context-entries`.
+
+**3. IAM is eventually consistent.** After changing a role policy, give it a
+minute before concluding a permission is missing.
+
 ## One-time setup
 
 ```bash
