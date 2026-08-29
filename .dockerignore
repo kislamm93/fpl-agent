@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.github/
+.agentcore/
+.env
+.env.local
+scripts/
+dist/
+build/
+*.egg-info/
+*.md

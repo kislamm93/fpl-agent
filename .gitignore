@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.local
+.agentcore/
+dist/
+build/
+*.egg-info/
+
+# CI artefacts
+.DS_Store

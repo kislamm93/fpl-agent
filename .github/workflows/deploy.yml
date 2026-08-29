@@ -1,0 +1,173 @@
+name: Deploy to AgentCore Runtime
+
+on:
+  push:
+    branches: [main]          # covers "merge a PR to main" — a merge IS a push to main
+  workflow_dispatch:           # manual re-deploy button in the Actions tab
+
+# Never let two deploys race on the same runtime.
+concurrency:
+  group: agentcore-deploy
+  cancel-in-progress: false
+
+permissions:
+  id-token: write              # required to mint the OIDC token for AWS
+  contents: read
+
+env:
+  AWS_REGION: eu-central-1
+  ECR_REPO: fpl-agent
+  RUNTIME_NAME: fpl_agent      # letters/digits/underscore only — no hyphens
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keyless auth: assumes the deploy role via GitHub's OIDC provider.
+      # No AWS access keys are ever stored in the repo.
+      - name: Assume AWS deploy role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # AgentCore is arm64-only and ubuntu-latest is amd64, so cross-build.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          provenance: false     # AgentCore rejects multi-manifest attestation images
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create or update the runtime
+        id: runtime
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}
+          EXEC_ROLE_ARN: ${{ secrets.AGENTCORE_EXECUTION_ROLE_ARN }}
+          FPL_BACKEND_URL: ${{ vars.FPL_BACKEND_URL }}
+        run: |
+          set -euo pipefail
+
+          ARTIFACT="$(jq -nc --arg uri "$IMAGE" \
+            '{containerConfiguration:{containerUri:$uri}}')"
+
+          # Only pass the var when it has a value. Setting it to "" would defeat
+          # backend.py's localhost default and fail with UnsupportedProtocol.
+          ENV_ARGS=()
+          if [ -n "${FPL_BACKEND_URL:-}" ]; then
+            ENV_ARGS=(--environment-variables \
+              "$(jq -nc --arg url "$FPL_BACKEND_URL" '{FPL_BACKEND_URL:$url}')")
+          else
+            echo "::warning::FPL_BACKEND_URL is unset — the runtime will deploy and \
+          ping healthy, but every tool call will fail until you set it."
+          fi
+
+          # Same name -> update in place, so the ARN the caller uses never changes.
+          RUNTIME_ID="$(aws bedrock-agentcore-control list-agent-runtimes \
+            --region "$AWS_REGION" \
+            --query "agentRuntimes[?agentRuntimeName=='${RUNTIME_NAME}'].agentRuntimeId | [0]" \
+            --output text)"
+
+          if [ "$RUNTIME_ID" = "None" ] || [ -z "$RUNTIME_ID" ]; then
+            echo "Runtime '$RUNTIME_NAME' not found — creating it."
+            RUNTIME_ID="$(aws bedrock-agentcore-control create-agent-runtime \
+              --region "$AWS_REGION" \
+              --agent-runtime-name "$RUNTIME_NAME" \
+              --agent-runtime-artifact "$ARTIFACT" \
+              --role-arn "$EXEC_ROLE_ARN" \
+              --network-configuration '{"networkMode":"PUBLIC"}' \
+              --protocol-configuration '{"serverProtocol":"HTTP"}' \
+              ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} \
+              --description "Deployed from ${GITHUB_SHA:0:7}" \
+              --query agentRuntimeId --output text)"
+          else
+            echo "Updating existing runtime $RUNTIME_ID."
+            aws bedrock-agentcore-control update-agent-runtime \
+              --region "$AWS_REGION" \
+              --agent-runtime-id "$RUNTIME_ID" \
+              --agent-runtime-artifact "$ARTIFACT" \
+              --role-arn "$EXEC_ROLE_ARN" \
+              --network-configuration '{"networkMode":"PUBLIC"}' \
+              --protocol-configuration '{"serverProtocol":"HTTP"}' \
+              ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} \
+              --description "Deployed from ${GITHUB_SHA:0:7}" >/dev/null
+          fi
+
+          ARN="$(aws bedrock-agentcore-control get-agent-runtime \
+            --region "$AWS_REGION" --agent-runtime-id "$RUNTIME_ID" \
+            --query agentRuntimeArn --output text)"
+
+          echo "runtime_id=$RUNTIME_ID" >> "$GITHUB_OUTPUT"
+          echo "runtime_arn=$ARN"       >> "$GITHUB_OUTPUT"
+
+      # This IS the ping test: AgentCore only marks a runtime READY after the
+      # container answers GET /ping. No model access needed to pass this.
+      - name: Wait for the runtime to become healthy
+        env:
+          RUNTIME_ID: ${{ steps.runtime.outputs.runtime_id }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            STATUS="$(aws bedrock-agentcore-control get-agent-runtime \
+              --region "$AWS_REGION" --agent-runtime-id "$RUNTIME_ID" \
+              --query status --output text)"
+            echo "attempt $i: $STATUS"
+            case "$STATUS" in
+              READY)
+                echo "Runtime is READY — container answered /ping."
+                exit 0 ;;
+              CREATE_FAILED|UPDATE_FAILED)
+                echo "::error::Deploy failed with status $STATUS"
+                exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Timed out after 10 minutes waiting for READY"
+          exit 1
+
+      # Optional end-to-end check. Expected to fail while the account's Bedrock
+      # token quota is 0, so it does not gate the deploy. Flip
+      # continue-on-error to false once model access is sorted.
+      - name: Invoke smoke test (non-gating)
+        continue-on-error: true
+        env:
+          ARN: ${{ steps.runtime.outputs.runtime_arn }}
+        run: |
+          set -o pipefail
+          aws bedrock-agentcore invoke-agent-runtime \
+            --region "$AWS_REGION" \
+            --agent-runtime-arn "$ARN" \
+            --runtime-session-id "ci-$(uuidgen)-$(date +%s)" \
+            --payload "$(printf '{"prompt":"ping"}' | base64)" \
+            /tmp/out.json
+          cat /tmp/out.json
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### AgentCore deploy"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| commit | \`${GITHUB_SHA:0:7}\` |"
+            echo "| runtime | \`${{ steps.runtime.outputs.runtime_id }}\` |"
+            echo "| arn | \`${{ steps.runtime.outputs.runtime_arn }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
