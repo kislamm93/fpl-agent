@@ -84,10 +84,14 @@ DEPLOY_POLICY="$(jq -nc \
         "ecr:BatchCheckLayerAvailability","ecr:InitiateLayerUpload",
         "ecr:UploadLayerPart","ecr:CompleteLayerUpload","ecr:PutImage",
         "ecr:BatchGetImage","ecr:DescribeRepositories","ecr:DescribeImages" ] },
-    { Sid: "AgentCore", Effect: "Allow", Resource: "*", Action: [
-        "bedrock-agentcore:CreateAgentRuntime","bedrock-agentcore:UpdateAgentRuntime",
-        "bedrock-agentcore:GetAgentRuntime","bedrock-agentcore:ListAgentRuntimes",
-        "bedrock-agentcore:InvokeAgentRuntime" ] },
+    # CreateAgentRuntime transitively provisions other AgentCore resources
+    # (a workload identity, a DEFAULT endpoint, a token vault). AWS reports any
+    # of those denials as "not authorized to perform CreateAgentRuntime", which
+    # makes enumerating the exact set a guessing game. Grant the namespace and
+    # keep the blast radius small elsewhere: the OIDC trust already pins this
+    # role to one repo and one branch, and ECR/PassRole below stay scoped.
+    { Sid: "AgentCore", Effect: "Allow", Resource: "*",
+      Action: "bedrock-agentcore:*" },
     { Sid: "PassExecRole", Effect: "Allow", Action: "iam:PassRole", Resource: $exec,
       Condition: { StringEquals: { "iam:PassedToService": "bedrock-agentcore.amazonaws.com" } } }
   ]
