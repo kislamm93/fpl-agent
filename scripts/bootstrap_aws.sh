@@ -41,7 +41,10 @@ echo "oidc ok"
 # --- 3. Deploy role (assumed by GitHub Actions) -----------------------------
 # `sub` pins this to pushes on main of THIS repo only. A fork or another branch
 # gets no credentials, even though they share the same OIDC issuer.
-DEPLOY_TRUST="$(jq -nc --arg arn "$OIDC_ARN" --arg repo "$REPO" '{
+OWNER="${REPO%%/*}"
+NAME="${REPO##*/}"
+DEPLOY_TRUST="$(jq -nc --arg arn "$OIDC_ARN" --arg repo "$REPO" \
+  --arg owner "$OWNER" --arg name "$NAME" '{
   Version: "2012-10-17",
   Statement: [{
     Effect: "Allow",
@@ -49,7 +52,15 @@ DEPLOY_TRUST="$(jq -nc --arg arn "$OIDC_ARN" --arg repo "$REPO" '{
     Action: "sts:AssumeRoleWithWebIdentity",
     Condition: {
       StringEquals: { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
-      StringLike:   { "token.actions.githubusercontent.com:sub": ("repo:" + $repo + ":ref:refs/heads/main") }
+      StringLike:   { "token.actions.githubusercontent.com:sub": [
+        # Legacy claim format.
+        ("repo:" + $repo + ":ref:refs/heads/main"),
+        # Immutable claim format: GitHub embeds the numeric owner/repo IDs as
+        # owner@<owner_id>/repo@<repo_id> so a deleted-and-recreated repo of the
+        # same name cannot inherit this role. Both are accepted (StringLike ORs
+        # a list) because which one GitHub sends varies by account.
+        ("repo:" + $owner + "@*/" + $name + "@*:ref:refs/heads/main")
+      ] }
     }
   }]
 }')"
