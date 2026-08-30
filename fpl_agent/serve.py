@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from fpl_agent.agent import build_agent
+from fpl_agent.sessions import agent_for
 
 app = FastAPI(title="FPL Agent (local dev server)")
 app.add_middleware(
@@ -21,11 +21,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_agent = build_agent()
-
-
 class InvokeRequest(BaseModel):
     prompt: str
+    # Pass one id per browser conversation so chats stay separate.
+    session_id: str | None = None
 
 
 @app.get("/health")
@@ -36,5 +35,5 @@ def health():
 @app.post("/invoke")
 def invoke(req: InvokeRequest):
     """Run the agent once and return its text reply."""
-    reply = str(_agent(req.prompt))
+    reply = str(agent_for(req.session_id)(req.prompt))
     return {"reply": reply}

@@ -11,7 +11,8 @@ from __future__ import annotations
 import difflib
 import os
 import re
-from functools import lru_cache
+import time
+from threading import Lock
 from typing import Any
 
 import httpx
@@ -22,16 +23,60 @@ _POSITION = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
 _POSITION_ID = {v: k for k, v in _POSITION.items()}
 
 
+# --------------------------------------------------------------------------
+# Short-lived response cache.
+#
+# Keyed by path + params, so /entry/<manager_id>/event/<gw>/picks caches per
+# manager per gameweek, while league-wide data (bootstrap, odds, ticker) is
+# fetched once and shared by every caller. bootstrap-static alone is ~1.6 MB
+# and is read by both players() and manager_squad().
+#
+# The TTL is the point: prices, injury news and odds all move during the week.
+# This previously used a functools cache with no expiry, so a container
+# running for a day served day-old injury news.
+# --------------------------------------------------------------------------
+_TTL_SECONDS = int(os.environ.get("FPL_CACHE_TTL_SECONDS", "600"))
+_MAX_CACHE_ENTRIES = 200
+
+_cache: dict[tuple, tuple[float, Any]] = {}
+_cache_lock = Lock()
+
+
 def _get(path: str, **params: Any) -> Any:
+    key = (path, tuple(sorted(params.items())))
+    now = time.monotonic()
+
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit is not None and now - hit[0] < _TTL_SECONDS:
+            return hit[1]
+
+    # Fetch outside the lock so a slow backend can't block every other caller.
+    # Two concurrent misses may both fetch; that is cheaper than serialising
+    # every request behind one 30s timeout.
     r = httpx.get(f"{FPL_BACKEND}{path}", params=params, timeout=30)
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+
+    with _cache_lock:
+        _cache[key] = (time.monotonic(), data)
+        if len(_cache) > _MAX_CACHE_ENTRIES:
+            for k, _ in sorted(_cache.items(), key=lambda kv: kv[1][0]):
+                if len(_cache) <= _MAX_CACHE_ENTRIES:
+                    break
+                del _cache[k]
+    return data
+
+
+def clear_cache() -> None:
+    """Drop every cached response (tests, or to force a refresh)."""
+    with _cache_lock:
+        _cache.clear()
 
 
 # --------------------------------------------------------------------------
-# bootstrap helpers (teams + player index), cached per process
+# bootstrap helpers (teams + player index) — _get above does the caching
 # --------------------------------------------------------------------------
-@lru_cache(maxsize=1)
 def _bootstrap() -> dict:
     return _get("/bootstrap-static")
 
@@ -40,7 +85,6 @@ def _teams() -> list[dict]:
     return _bootstrap().get("teams", [])
 
 
-@lru_cache(maxsize=1)
 def _team_by_id() -> dict[int, dict]:
     return {t["id"]: t for t in _teams()}
 

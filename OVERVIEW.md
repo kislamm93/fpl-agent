@@ -37,6 +37,7 @@ Traffic flows **both ways**, which is the thing most people get wrong first:
 | `fpl_agent/backend.py` | Framework-free HTTP client. Trims every response before the model sees it, and resolves odds-API team names ("Nottingham Forest") to FPL short names ("NFO"). No Strands import, so it's testable on its own. |
 | `fpl_agent/tools.py` | Five `@tool` wrappers: `current_gameweek`, `match_odds`, `fixture_difficulty`, `players`, `manager_squad`. |
 | `fpl_agent/agent.py` | The Strands `Agent` and its system prompt. |
+| `fpl_agent/sessions.py` | One agent per conversation, keyed by AgentCore's session id. Bounded and idle-expiring, so two people asking about captains never share a chat history. |
 | `fpl_agent/main.py` | AgentCore entrypoint (`@app.entrypoint`) plus a local CLI runner. |
 | `fpl_agent/serve.py` | Local dev HTTP server, so the frontend can reach the agent before it's deployed. |
 | `scripts/smoke_tools.py` | Exercises the data layer against a live backend. No Strands or AWS needed. |
