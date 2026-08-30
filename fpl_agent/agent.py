@@ -1,4 +1,6 @@
 """The Strands agent: captaincy & fixtures assistant for a friends' FPL mini-league."""
+import os
+
 from strands import Agent
 
 from fpl_agent.tools import ALL_TOOLS
@@ -37,5 +39,38 @@ their call.
 """
 
 
+def _build_model():
+    """Choose the model backend.
+
+    Defaults to Bedrock, which is what the deployed runtime uses — returning
+    None lets Strands resolve its own default (global.anthropic.claude-sonnet-4-6).
+
+    Set FPL_MODEL_PROVIDER=ollama to run the whole agent against a local Ollama
+    instance instead. That needs no AWS access at all, so the tools and prompt
+    can be exercised end to end while Bedrock is unavailable. Pick a model that
+    supports tool calling (llama3.1 does; gemma3 does not).
+    """
+    if os.environ.get("FPL_MODEL_PROVIDER", "bedrock").lower() != "ollama":
+        return None
+
+    from strands.models.ollama import OllamaModel
+
+    return OllamaModel(
+        host=os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"),
+        model_id=os.environ.get("OLLAMA_MODEL", "llama3.1"),
+    )
+
+
 def build_agent() -> Agent:
-    return Agent(name="FplAgent", system_prompt=SYSTEM_PROMPT, tools=ALL_TOOLS)
+    model = _build_model()
+    extra = {"model": model} if model is not None else {}
+    # callback_handler=None: by default Strands streams the reply to stdout,
+    # which duplicates output for any caller that also prints the result, and
+    # is just noise in the runtime's CloudWatch logs. Let the caller render it.
+    return Agent(
+        name="FplAgent",
+        system_prompt=SYSTEM_PROMPT,
+        tools=ALL_TOOLS,
+        callback_handler=None,
+        **extra,
+    )

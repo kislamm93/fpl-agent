@@ -14,6 +14,11 @@ dev = ["strands-agents-tools"]
 # Local dev HTTP server (fpl_agent/serve.py) so the frontend can reach the agent
 # before it's deployed to AgentCore Runtime.
 serve = ["fastapi>=0.103", "uvicorn>=0.23"]
+# Run the agent against a local Ollama instead of Bedrock:
+#   pip install -e ".[ollama]"
+#   FPL_MODEL_PROVIDER=ollama python -m fpl_agent.main "..."
+# Deliberately optional — the deployed image must not carry it.
+ollama = ["ollama>=0.3"]
 
 [build-system]
 requires = ["hatchling"]
